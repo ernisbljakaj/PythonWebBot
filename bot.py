@@ -22,7 +22,6 @@ def handle_captcha(page):
 
     if is_sorry or has_captcha:
         print("\a⚠️ CAPTCHA erkannt! Bitte im Browser lösen...")
-        # Wartet bis zu 5 Minuten, bis Google auf die Suchergebnisse weiterleitet
         page.wait_for_function(
             """() => {
                 const urlOk = !window.location.href.includes('/sorry/');
@@ -34,7 +33,7 @@ def handle_captcha(page):
         )
         print("✅ CAPTCHA gelöst! Lade Suchergebnisse...")
         page.wait_for_load_state("domcontentloaded")
-        time.sleep(2)
+        time.sleep(2.5)
 
 
 with sync_playwright() as p:
@@ -75,38 +74,64 @@ with sync_playwright() as p:
                     break
 
             # 3. Suchbegriff eingeben und Enter drücken
-            search_box = page.locator("textarea[name='q']:visible, input[name='q']:visible").first
+            search_box = page.locator(
+                "textarea[name='q']:visible, input[name='q']:visible"
+            ).first
             search_box.click()
             search_box.type(SEARCH_QUERY, delay=random.randint(60, 140))
             page.keyboard.press("Enter")
 
-            # 4. Prüfen, ob nach der Suche ein CAPTCHA kommt & warten bis gelöst
+            # 4. Auf Suchergebnisse warten & ggf. CAPTCHA abfangen
+            page.wait_for_load_state("domcontentloaded")
             handle_captcha(page)
+            time.sleep(2)
 
-            # 5. Auf sichtbaren Suchergebnis-Link warten
-            visible_link_selector = f"#search a[href*='{TARGET_DOMAIN}']:visible, #rso a[href*='{TARGET_DOMAIN}']:visible"
-            page.wait_for_selector(visible_link_selector, timeout=20000)
-            time.sleep(random.uniform(1.0, 2.0))
+            # 5. Den ersten sichtbaren Suchergebnis-Link oben finden (Desktop & Mobil)
+            # Desktop nutzt <a> mit <h3>, Mobile oft <a> mit role="heading" oder sichtbar liss-inderkum.com
+            result_selectors = [
+                f"a:has-text('{TARGET_DOMAIN}'):visible",
+                "a:has(h3):visible",
+                "a:has([role='heading']):visible",
+                "a:has-text('Liss'):visible",
+            ]
 
-            target_link = page.locator(visible_link_selector).first
-            target_link.scroll_into_view_if_needed()
-            
-            # Klick ausführen (mit Fallback, falls Google-Overlay den Klick abfängt)
-            try:
-                target_link.click(timeout=5000)
-            except Exception:
-                href = target_link.get_attribute("href")
-                if href:
-                    page.goto(href, wait_until="domcontentloaded")
+            first_result = None
+            for selector in result_selectors:
+                loc = page.locator(selector)
+                for idx in range(loc.count()):
+                    candidate = loc.nth(idx)
+                    href = candidate.get_attribute("href") or ""
+                    # Google-eigene Links (Suche, Bilder, Maps, Login) überspringen
+                    if (
+                        not href
+                        or href.startswith("#")
+                        or "google.ch/search" in href
+                        or "google.com/search" in href
+                        or "accounts.google" in href
+                    ):
+                        continue
+                    first_result = candidate
+                    break
+                if first_result:
+                    break
 
-            # Warten, bis die Zielseite wirklich geladen ist
-            page.wait_for_url(f"**/*{TARGET_DOMAIN}*", timeout=20000)
-            print(f"🌐 Erfolgreich auf {page.url} gelandet!")
+            if first_result:
+                first_result.scroll_into_view_if_needed()
+                time.sleep(random.uniform(0.8, 1.5))
+                print(f"Klicke auf ersten Treffer: {first_result.inner_text().splitlines()[0]}")
+                first_result.click()
 
-            # 6. Auf der Webseite verweilen & scrollen
-            time.sleep(random.uniform(3.0, 5.0))
-            page.mouse.wheel(0, random.randint(250, 600))
-            time.sleep(random.uniform(1.5, 3.0))
+                # Warten, bis die Zielseite geladen ist
+                page.wait_for_load_state("domcontentloaded", timeout=20000)
+                time.sleep(2)
+                print(f"🌐 Erfolgreich auf der Webseite: {page.url}")
+
+                # 6. Auf der Webseite verweilen & scrollen
+                time.sleep(random.uniform(3.0, 5.0))
+                page.mouse.wheel(0, random.randint(250, 600))
+                time.sleep(random.uniform(1.5, 3.0))
+            else:
+                print("⚠️ Konnte keinen anklickbaren Suchtreffer finden.")
 
         except Exception as e:
             print(f"❌ Fehler bei Durchlauf {i} ({device_name}): {e}")
