@@ -1,3 +1,4 @@
+import os
 import random
 import time
 from playwright.sync_api import sync_playwright
@@ -5,6 +6,7 @@ from playwright.sync_api import sync_playwright
 SEARCH_QUERY = "liss inderkum"
 TARGET_DOMAIN = "liss-inderkum.com"
 MAX_VISITS = 5
+STATE_FILE = "google_state.json"
 
 DEVICES = [
     "iPhone 14",
@@ -14,8 +16,8 @@ DEVICES = [
 ]
 
 
-def handle_captcha(page):
-    """Pausiert das Skript, solange ein Google-CAPTCHA aktiv ist."""
+def handle_captcha(page, context):
+    """Pausiert das Skript bei aktivem CAPTCHA und speichert danach den Sitzungszustand."""
     time.sleep(1.5)
     is_sorry = "google.com/sorry" in page.url or "google.ch/sorry" in page.url
     has_captcha = page.locator("iframe[src*='recaptcha']").count() > 0
@@ -31,9 +33,10 @@ def handle_captcha(page):
             }""",
             timeout=300000,
         )
-        print("✅ CAPTCHA gelöst! Lade Suchergebnisse...")
+        print("✅ CAPTCHA gelöst! Speichere Sitzungszustand...")
         page.wait_for_load_state("domcontentloaded")
         time.sleep(2.5)
+        context.storage_state(path=STATE_FILE)
 
 
 with sync_playwright() as p:
@@ -46,10 +49,14 @@ with sync_playwright() as p:
         device_name = random.choice(DEVICES)
         print(f"\n--- Durchlauf {i}/{MAX_VISITS} | Gerät: {device_name} ---")
 
+        # Gespeicherten Zustand laden, falls die Datei bereits existiert
+        saved_state = STATE_FILE if os.path.exists(STATE_FILE) else None
+
         context = browser.new_context(
             **p.devices[device_name],
             locale="de-CH",
             timezone_id="Europe/Zurich",
+            storage_state=saved_state,
         )
         context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
@@ -63,14 +70,15 @@ with sync_playwright() as p:
                 wait_until="domcontentloaded",
                 timeout=20000,
             )
-            handle_captcha(page)
+            handle_captcha(page, context)
 
-            # 2. Cookie-Banner wegklicken (falls vorhanden)
+            # 2. Cookie-Banner wegklicken (falls vorhanden) und Zustand sichern
             for btn_text in ["Alle akzeptieren", "Alle ablehnen", "Accept all"]:
                 btn = page.locator(f"button:has-text('{btn_text}'):visible").first
                 if btn.count() > 0:
                     btn.click()
                     time.sleep(1)
+                    context.storage_state(path=STATE_FILE)
                     break
 
             # 3. Suchbegriff eingeben und Enter drücken
@@ -83,11 +91,10 @@ with sync_playwright() as p:
 
             # 4. Auf Suchergebnisse warten & ggf. CAPTCHA abfangen
             page.wait_for_load_state("domcontentloaded")
-            handle_captcha(page)
+            handle_captcha(page, context)
             time.sleep(2)
 
-            # 5. Den ersten sichtbaren Suchergebnis-Link oben finden (Desktop & Mobil)
-            # Desktop nutzt <a> mit <h3>, Mobile oft <a> mit role="heading" oder sichtbar liss-inderkum.com
+            # 5. Ersten sichtbaren Suchergebnis-Link finden
             result_selectors = [
                 f"a:has-text('{TARGET_DOMAIN}'):visible",
                 "a:has(h3):visible",
@@ -101,7 +108,6 @@ with sync_playwright() as p:
                 for idx in range(loc.count()):
                     candidate = loc.nth(idx)
                     href = candidate.get_attribute("href") or ""
-                    # Google-eigene Links (Suche, Bilder, Maps, Login) überspringen
                     if (
                         not href
                         or href.startswith("#")
@@ -118,10 +124,11 @@ with sync_playwright() as p:
             if first_result:
                 first_result.scroll_into_view_if_needed()
                 time.sleep(random.uniform(0.8, 1.5))
-                print(f"Klicke auf ersten Treffer: {first_result.inner_text().splitlines()[0]}")
+                print(
+                    f"Klicke auf ersten Treffer: {first_result.inner_text().splitlines()[0]}"
+                )
                 first_result.click()
 
-                # Warten, bis die Zielseite geladen ist
                 page.wait_for_load_state("domcontentloaded", timeout=20000)
                 time.sleep(2)
                 print(f"🌐 Erfolgreich auf der Webseite: {page.url}")
@@ -137,6 +144,8 @@ with sync_playwright() as p:
             print(f"❌ Fehler bei Durchlauf {i} ({device_name}): {e}")
 
         finally:
+            # Am Ende jedes Durchlaufs aktuelle Cookies aktualisieren und Kontext schließen
+            context.storage_state(path=STATE_FILE)
             context.close()
 
         if i < MAX_VISITS:
